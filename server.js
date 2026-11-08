@@ -6,11 +6,35 @@ const fs = require('fs');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '20mb' }));
+app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
 const PORT = process.env.PORT || 3000;
 const SERVICE_ACCOUNT_PATH = path.join(__dirname, 'serviceAccountKey.json');
 const RENDER_SECRET_PATH = '/etc/secrets/serviceAccountKey.json';
+const UPLOADS_DIR = path.join(__dirname, 'uploads');
+
+if (!fs.existsSync(UPLOADS_DIR)) {
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+}
+app.use('/uploads', express.static(UPLOADS_DIR));
+
+// Limpieza periodica de imagenes temporales (mas de 24 horas)
+setInterval(() => {
+  try {
+    const now = Date.now();
+    const files = fs.readdirSync(UPLOADS_DIR);
+    for (const file of files) {
+      const filePath = path.join(UPLOADS_DIR, file);
+      const stats = fs.statSync(filePath);
+      if (now - stats.mtimeMs > 24 * 60 * 60 * 1000) {
+        fs.unlinkSync(filePath);
+      }
+    }
+  } catch (err) {
+    console.error('[ERROR] Error limpiando uploads antiguos:', err.message);
+  }
+}, 60 * 60 * 1000);
 
 // Inicializar Firebase Admin SDK
 let firebaseInitialized = false;
@@ -67,39 +91,83 @@ app.post('/api/send-alert', async (req, res) => {
   if (!firebaseInitialized) {
     return res.status(500).json({
       success: false,
-      error: 'Firebase Admin no está inicializado. Coloca serviceAccountKey.json en la carpeta del servidor.',
+      error: 'Firebase Admin no esta inicializado. Configura FIREBASE_SERVICE_ACCOUNT en el servidor.',
     });
   }
 
-  const { title = '¡Alerta Recibida!', body = 'Una persona ha presionado el botón en la app.' } = req.body;
+  const {
+    title = '¡Alerta Recibida!',
+    body = 'Una persona ha presionado el boton en la app.',
+    imageBase64,
+  } = req.body;
 
-  // Mensaje que se envía al tema 'alerta_general'
+  let imageUrl = req.body.imageUrl || null;
+
+  // Si se envia una imagen en base64, guardarla en el servidor y generar URL publica
+  if (imageBase64) {
+    try {
+      const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+      const buffer = Buffer.from(cleanBase64, 'base64');
+      const filename = `alert_${Date.now()}_${Math.random().toString(36).substring(2, 8)}.jpg`;
+      const filePath = path.join(UPLOADS_DIR, filename);
+      fs.writeFileSync(filePath, buffer);
+
+      const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+      const host = req.get('host');
+      imageUrl = `${protocol}://${host}/uploads/${filename}`;
+      console.log('[OK] Imagen multimedia procesada y lista:', imageUrl);
+    } catch (imgError) {
+      console.error('[ERROR] Error procesando imagen base64:', imgError.message);
+    }
+  }
+
+  // Estructura del mensaje FCM para que Android muestre la imagen expandible
+  const notificationPayload = {
+    title: title,
+    body: body,
+  };
+  if (imageUrl) {
+    notificationPayload.imageUrl = imageUrl;
+  }
+
+  const androidNotificationPayload = {
+    sound: 'default',
+    channelId: 'alerta_channel',
+    priority: 'max',
+  };
+  if (imageUrl) {
+    androidNotificationPayload.imageUrl = imageUrl;
+  }
+
+  const dataPayload = {
+    title: title,
+    body: body,
+  };
+  if (imageUrl) {
+    dataPayload.imageUrl = imageUrl;
+  }
+
   const message = {
-    notification: {
-      title: title,
-      body: body,
-    },
+    notification: notificationPayload,
     android: {
       priority: 'high',
-      notification: {
-        sound: 'default',
-        channelId: 'alerta_channel',
-        priority: 'max',
-      },
+      notification: androidNotificationPayload,
     },
+    data: dataPayload,
     topic: 'alerta_general',
   };
 
   try {
     const response = await admin.messaging().send(message);
-    console.log(`[${new Date().toLocaleTimeString()}] Notificación enviada exitosamente:`, response);
+    console.log(`[${new Date().toLocaleTimeString()}] Notificacion enviada exitosamente:`, response);
     return res.status(200).json({
       success: true,
       messageId: response,
-      message: 'Notificación enviada a todos los dispositivos suscritos.',
+      imageUrl: imageUrl,
+      message: 'Notificacion enviada a todos los dispositivos suscritos.',
     });
   } catch (error) {
-    console.error('Error al enviar mensaje vía FCM:', error);
+    console.error('[ERROR] Error al enviar mensaje via FCM:', error);
     return res.status(500).json({
       success: false,
       error: error.message,
