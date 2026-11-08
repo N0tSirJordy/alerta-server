@@ -108,12 +108,24 @@ app.post('/api/send-alert', async (req, res) => {
     try {
       const cleanBase64 = imageBase64.replace(/^data:image\/\w+;base64,/, '');
       const buffer = Buffer.from(cleanBase64, 'base64');
-      const filename = `alert_${Date.now()}_${Math.random().toString(36).substring(2, 8)}.jpg`;
+
+      let ext = 'jpg';
+      if (buffer.length > 4) {
+        if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
+          ext = 'png';
+        } else if (buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46) {
+          ext = 'webp';
+        }
+      }
+
+      const filename = `alert_${Date.now()}_${Math.random().toString(36).substring(2, 8)}.${ext}`;
       const filePath = path.join(UPLOADS_DIR, filename);
       fs.writeFileSync(filePath, buffer);
 
-      const protocol = req.headers['x-forwarded-proto'] || req.protocol;
       const host = req.get('host');
+      const rawProto = req.headers['x-forwarded-proto'];
+      const proto = rawProto ? rawProto.split(',')[0].trim() : req.protocol;
+      const protocol = host.includes('localhost') ? (proto || 'http') : 'https';
       imageUrl = `${protocol}://${host}/uploads/${filename}`;
       console.log('[OK] Imagen multimedia procesada y lista:', imageUrl);
     } catch (imgError) {
@@ -123,8 +135,8 @@ app.post('/api/send-alert', async (req, res) => {
 
   // Estructura del mensaje FCM para que Android muestre la imagen expandible
   const notificationPayload = {
-    title: title,
-    body: body,
+    title: String(title),
+    body: String(body),
   };
   if (imageUrl) {
     notificationPayload.imageUrl = imageUrl;
@@ -140,11 +152,12 @@ app.post('/api/send-alert', async (req, res) => {
   }
 
   const dataPayload = {
-    title: title,
-    body: body,
+    title: String(title),
+    body: String(body),
   };
   if (imageUrl) {
-    dataPayload.imageUrl = imageUrl;
+    dataPayload.imageUrl = String(imageUrl);
+    dataPayload.image = String(imageUrl);
   }
 
   const message = {
